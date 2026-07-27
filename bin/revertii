@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# revertii — apply an update to a service, and take it back automatically if
+# the service does not come back healthy.
+#
+# The point is the case where you cannot log in to fix it: you updated the
+# thing your access runs through. So the safety net is not "the operator
+# notices and rolls back" — it is a timer armed on the host BEFORE the change,
+# which reverts on its own if nobody confirms in time. Same idea as Cisco's
+# `reload in 5` or `iptables-apply`: the change is provisional until proven.
+#
+# Ordering matters and is the whole design:
+#   1. snapshot the current state
+#   2. arm the dead man's switch
+#   3. apply the update
+#   4. check health against a deadline
+#   5. healthy -> disarm; unhealthy -> revert now, do not wait for the timer
+#
+# Step 2 sits before step 3 on purpose. If the update takes the host down with
+# it, steps 4 and 5 never run — the timer is the only thing left, and it is
+# already armed.
+set -uo pipefail
+
+readonly VERSION="0.1.0"
+CONFIG_DIR="${REVERTII_CONFIG_DIR:-/etc/revertii}"
+STATE_DIR="${REVERTII_STATE_DIR:-/var/lib/revertii}"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+readonly SELF
+
+usage() {
+  cat <<'EOF'
+revertii — update a service with an automatic way back
+
+  revertii update <service>    snapshot, update, verify, revert if unhealthy
+  revertii check <service>     run the health check only, change nothing
+  revertii revert <service>    restore the last snapshot now
+  revertii confirm <service>   disarm the pending revert timer, keep the update
+  revertii status <service>    what is armed, what was snapshotted, when
+  revertii list                configured services
+
+Options:
+  --dry-run     print what would run, run nothing that changes state
+  --timeout <s> override the health deadline for this run
+  -h, --help    this text
+  --version
+
+Config: <config-dir>/<service>.conf   State: <state-dir>/<service>.state
+EOF
+}
+
+# ─── output ──────────────────────────────────────────────────────────────────
+# Everything goes to stderr except data a caller might parse, so `revertii
+# status --json` stays pipeable later without the log getting in the way.
+
+log()  { printf '%s\n' "$*" >&2; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+die()  { printf 'revertii: %s\n' "$*" >&2; exit 2; }
+
+# ─── config ──────────────────────────────────────────────────────────────────
+
+# A service config is sourced, so it can hold real commands — which is the
+# point, since "how do I restore this" is not expressible as a data value.
+# That also makes it as privileged as a script, hence the ownership check:
+# a world-writable config would be a way to run code as whoever runs revertii.
+load_config() {
+  local service="$1"
+  local file="$CONFIG_DIR/$service.conf"
+
+  [ -f "$file" ] || die "no config for '$service' at $file — see 'revertii list'"
+
+  # Group AND other, not just the last digit: 660 is group-writable and would
+  # sail through a check that only looks at the final character.
+  local perms
+  perms="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || echo "")"
+  perms="$(printf '%03d' "0$perms" 2>/dev/null || printf '%s' "$perms")"
+  perms="${perms: -3}"
+  case "${perms:1:1}${perms:2:1}" in
+    *[2367]*) die "$file is group- or world-writable ($perms) — it is sourced and executed, so chmod 600 it" ;;
+  esac
+
+  KIND=""; SNAPSHOT=""; UPDATE=""; RESTORE=""; HEALTH=""
+  UNIT=""; HEALTH_TIMEOUT=""; HEALTH_INTERVAL=""; REVERT_AFTER=""
+  PROBE_RUN=""; MAX_AGE=""
+
+  # shellcheck disable=SC1090  # the path is the argument; that is the feature
+  source "$file"
+
+  KIND="${KIND:-daemon}"
+  HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-90}"
+  HEALTH_INTERVAL="${HEALTH_INTERVAL:-3}"
+  REVERT_AFTER="${REVERT_AFTER:-300}"
+  PROBE_RUN="${PROBE_RUN:-yes}"
+  MAX_AGE="${MAX_AGE:-86400}"
+
+  validate_config "$service" "$file"
+}
+
+validate_config() {
+  local service="$1" file="$2"
+
+  case "$KIND" in
+    daemon|job) ;;
+    *) die "$file: KIND must be 'daemon' or 'job', not '$KIND'" ;;
+  esac
+
+  local field
+  for field in SNAPSHOT UPDATE RESTORE; do
+    [ -n "${!field}" ] || die "$file: $field is required — it is what makes the update reversible"
+  done
+
+  if [ "$KIND" = daemon ] && [ -z "$HEALTH" ]; then
+    die "$file: a daemon needs HEALTH — a command that succeeds only when the service actually answers"
+  fi
+  if [ "$KIND" = job ] && [ -z "$UNIT" ]; then
+    die "$file: a job needs UNIT — the systemd unit whose last result is the health signal"
+  fi
+
+  for field in HEALTH_TIMEOUT HEALTH_INTERVAL REVERT_AFTER MAX_AGE; do
+    case "${!field}" in
+      ''|*[!0-9]*) die "$file: $field must be a whole number of seconds, got '${!field}'" ;;
+    esac
+  done
+
+  # A revert window shorter than the health check means the timer fires while
+  # the check is still deciding — the update would be taken back even when it
+  # was about to pass.
+  if [ "$REVERT_AFTER" -le "$HEALTH_TIMEOUT" ]; then
+    die "$file: REVERT_AFTER ($REVERT_AFTER) must exceed HEALTH_TIMEOUT ($HEALTH_TIMEOUT), or the timer fires mid-check"
+  fi
+
+  # Warned, not rejected: restoring a pinned compose file legitimately needs no
+  # snapshot value. But the common cause is a double-quoted $REVERTII_SNAPSHOT,
+  # which the shell expanded away while sourcing this file — leaving a RESTORE
+  # that looks right and quietly restores whatever is already running.
+  case "$RESTORE" in
+    *REVERTII_SNAPSHOT*) ;;
+    *) warn "$file: RESTORE does not mention \$REVERTII_SNAPSHOT — if it should, wrap the value in single quotes so it survives being sourced" ;;
+  esac
+}
+
+# ─── state ───────────────────────────────────────────────────────────────────
+
+state_file() { printf '%s/%s.state' "$STATE_DIR" "$1"; }
+
+write_state() {
+  local service="$1" snapshot="$2"
+  mkdir -p "$STATE_DIR" || die "cannot create $STATE_DIR"
+  # Written before the update, read by a revert that may run in a different
+  # process minutes later — the timer's, with no memory of this run.
+  {
+    printf 'snapshot=%s\n' "$snapshot"
+    printf 'armed_at=%s\n' "$(date +%s)"
+    printf 'timer=%s\n' "$(timer_unit "$service")"
+  } > "$(state_file "$service")"
+}
+
+# Returns non-zero rather than calling die: this runs inside a command
+# substitution, where `exit` would only kill the subshell and leave the caller
+# reverting with an empty snapshot — a silent no-op sold as a successful
+# rollback, in the one code path that exists to be trustworthy.
+read_snapshot() {
+  local service="$1" file
+  file="$(state_file "$service")"
+  [ -f "$file" ] || return 1
+  sed -n 's/^snapshot=//p' "$file"
+}
+
+clear_state() { rm -f "$(state_file "$1")"; }
+
+# ─── the dead man's switch ───────────────────────────────────────────────────
+
+timer_unit() { printf 'revertii-revert-%s' "$1"; }
+
+arm_timer() {
+  local service="$1" seconds="$2" unit
+  unit="$(timer_unit "$service")"
+
+  # Transient unit rather than a written .timer file: it must not survive a
+  # reboot. A revert firing hours later, after someone already fixed things by
+  # hand, would undo their work.
+  if ! systemd-run --collect --unit="$unit" --on-active="${seconds}s" \
+      --description="revertii: revert $service unless confirmed" \
+      "$SELF" revert "$service" --from-timer >/dev/null 2>&1; then
+    die "could not arm the revert timer for '$service' — refusing to update without a way back"
+  fi
+  log "revert armed: ${seconds}s from now (revertii confirm $service to keep the update)"
+}
+
+disarm_timer() {
+  local service="$1" unit
+  unit="$(timer_unit "$service")"
+  systemctl stop "$unit.timer" >/dev/null 2>&1
+  systemctl stop "$unit.service" >/dev/null 2>&1
+  systemctl reset-failed "$unit.service" >/dev/null 2>&1
+  return 0
+}
+
+timer_armed() {
+  systemctl is-active --quiet "$(timer_unit "$1").timer" 2>/dev/null
+}
+
+# ─── running configured commands ─────────────────────────────────────────────
+
+# Config commands go through `sh -c` because they are commands, written by
+# whoever owns the config — pipes and redirects are expected. What must never
+# happen is a *value* being pasted into one, so the snapshot is passed through
+# the environment instead of being interpolated into the string.
+run_step() {
+  local label="$1" command="$2"
+  if [ "${DRY_RUN:-no}" = yes ]; then
+    log "would run ($label): $command"
+    return 0
+  fi
+  sh -c "$command"
+}
+
+# ─── health ──────────────────────────────────────────────────────────────────
+
+# A daemon is healthy when it answers now. Retried until the deadline, because
+# "not up yet" and "not coming up" look identical for the first few seconds.
+health_daemon() {
+  local timeout="$1" deadline
+  deadline=$(( $(date +%s) + timeout ))
+  while :; do
+    if sh -c "$HEALTH" >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep "$HEALTH_INTERVAL"
+  done
+}
+
+# A periodic job has no "now" to probe — between runs, not running IS healthy.
+# The signal is its last result and how old that is. With PROBE_RUN the job is
+# started once on purpose: an untested backup job is exactly the failure that
+# stays quiet until the day it matters.
+health_job() {
+  local timeout="$1"
+
+  if [ "$PROBE_RUN" = yes ]; then
+    log "starting $UNIT once to see whether it still works"
+    systemctl start "$UNIT" >/dev/null 2>&1 || true
+    local deadline
+    deadline=$(( $(date +%s) + timeout ))
+    while systemctl is-active --quiet "$UNIT" 2>/dev/null; do
+      [ "$(date +%s)" -lt "$deadline" ] || {
+        warn "$UNIT still running after ${timeout}s — cannot tell yet whether it succeeds"
+        return 1
+      }
+      sleep "$HEALTH_INTERVAL"
+    done
+  fi
+
+  local result age now entered
+  result="$(systemctl show -p Result --value "$UNIT" 2>/dev/null)"
+  [ "$result" = success ] || { warn "$UNIT last result: ${result:-unknown}"; return 1; }
+
+  entered="$(systemctl show -p ExecMainExitTimestampMonotonic --value "$UNIT" 2>/dev/null)"
+  if [ -n "$entered" ] && [ "$entered" != 0 ]; then
+    now="$(cut -d' ' -f1 /proc/uptime 2>/dev/null | cut -d. -f1)"
+    age=$(( now - entered / 1000000 ))
+    if [ "$age" -gt "$MAX_AGE" ]; then
+      warn "$UNIT last succeeded ${age}s ago, older than MAX_AGE ($MAX_AGE)"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+check_health() {
+  local timeout="${1:-$HEALTH_TIMEOUT}"
+  if [ "${DRY_RUN:-no}" = yes ]; then
+    log "would check health ($KIND), deadline ${timeout}s"
+    return 0
+  fi
+  case "$KIND" in
+    daemon) health_daemon "$timeout" ;;
+    job)    health_job "$timeout" ;;
+  esac
+}
+
+# ─── commands ────────────────────────────────────────────────────────────────
+
+cmd_update() {
+  local service="$1"
+  load_config "$service"
+  local timeout="${TIMEOUT_OVERRIDE:-$HEALTH_TIMEOUT}"
+
+  if timer_armed "$service"; then
+    die "'$service' already has a revert pending — confirm or revert it before updating again"
+  fi
+
+  local snapshot
+  if [ "${DRY_RUN:-no}" = yes ]; then
+    snapshot="(dry-run)"
+    log "would snapshot: $SNAPSHOT"
+  else
+    snapshot="$(sh -c "$SNAPSHOT")" || die "snapshot failed — refusing to update without a recorded state to return to"
+    [ -n "$snapshot" ] || die "snapshot produced nothing — RESTORE would have no value to work with"
+    log "snapshot: $snapshot"
+    write_state "$service" "$snapshot"
+    arm_timer "$service" "$REVERT_AFTER"
+  fi
+
+  if ! run_step update "$UPDATE"; then
+    warn "update command failed — reverting now"
+    do_revert "$service"
+    return 1
+  fi
+
+  log "checking health (deadline ${timeout}s)…"
+  if check_health "$timeout"; then
+    [ "${DRY_RUN:-no}" = yes ] || { disarm_timer "$service"; clear_state "$service"; }
+    log "healthy — update kept"
+    return 0
+  fi
+
+  warn "not healthy within ${timeout}s — reverting"
+  do_revert "$service"
+  return 1
+}
+
+do_revert() {
+  local service="$1" snapshot
+  [ "${DRY_RUN:-no}" = yes ] && { log "would revert $service"; return 0; }
+
+  snapshot="$(read_snapshot "$service")" ||
+    die "no snapshot for '$service' — nothing was recorded to go back to"
+  [ -n "$snapshot" ] ||
+    die "recorded snapshot for '$service' is empty — refusing to run RESTORE with nothing to restore"
+  # Says which of the two happened, because that is the difference between
+  # "someone decided this" and "nobody confirmed in time" — and the journal is
+  # where she has to reconstruct it from, without logging in.
+  if [ "${FROM_TIMER:-no}" = yes ]; then
+    log "revert timer fired: '$service' was not confirmed within ${REVERT_AFTER}s"
+  else
+    log "reverting '$service' on request"
+  fi
+  log "restoring: $snapshot"
+
+  # The snapshot reaches RESTORE through the environment, never spliced into
+  # the command string — a tag with a space or a quote in it would otherwise
+  # change what runs.
+  if REVERTII_SNAPSHOT="$snapshot" sh -c "$RESTORE"; then
+    log "reverted to $snapshot"
+  else
+    # Nothing left to fall back to, so say plainly what state the host is in
+    # rather than exiting quietly on a failed rescue.
+    warn "RESTORE FAILED for '$service' — the host is running neither the confirmed old state nor a verified new one"
+    warn "snapshot was: $snapshot"
+    disarm_timer "$service"
+    exit 3
+  fi
+
+  disarm_timer "$service"
+  clear_state "$service"
+}
+
+cmd_revert() {
+  local service="$1"
+  load_config "$service"
+  do_revert "$service"
+}
+
+cmd_confirm() {
+  local service="$1"
+  load_config "$service"
+  timer_armed "$service" || die "'$service' has no pending revert — nothing to confirm"
+  disarm_timer "$service"
+  clear_state "$service"
+  log "confirmed — '$service' keeps the update"
+}
+
+cmd_check() {
+  local service="$1"
+  load_config "$service"
+  if check_health "${TIMEOUT_OVERRIDE:-$HEALTH_TIMEOUT}"; then
+    log "$service: healthy"
+    return 0
+  fi
+  log "$service: not healthy"
+  return 1
+}
+
+cmd_status() {
+  local service="$1" file
+  load_config "$service"
+  file="$(state_file "$service")"
+
+  printf 'service:  %s (%s)\n' "$service" "$KIND"
+  if timer_armed "$service"; then
+    local armed_at remaining
+    armed_at="$(sed -n 's/^armed_at=//p' "$file" 2>/dev/null)"
+    if [ -n "$armed_at" ]; then
+      remaining=$(( armed_at + REVERT_AFTER - $(date +%s) ))
+      printf 'pending:  revert in %ss unless confirmed\n' "$remaining"
+    else
+      printf 'pending:  revert armed\n'
+    fi
+    printf 'snapshot: %s\n' "$(read_snapshot "$service" || echo '(none recorded)')"
+  else
+    printf 'pending:  nothing — no update awaiting confirmation\n'
+  fi
+}
+
+cmd_list() {
+  [ -d "$CONFIG_DIR" ] || die "no config directory at $CONFIG_DIR"
+  local found=0 file service
+  for file in "$CONFIG_DIR"/*.conf; do
+    [ -e "$file" ] || continue
+    found=1
+    service="$(basename "$file" .conf)"
+    if timer_armed "$service"; then
+      printf '%s  (revert pending)\n' "$service"
+    else
+      printf '%s\n' "$service"
+    fi
+  done
+  [ "$found" -eq 1 ] || log "no services configured in $CONFIG_DIR"
+}
+
+# ─── entry ───────────────────────────────────────────────────────────────────
+
+main() {
+  local cmd="" service="" arg
+  DRY_RUN=no
+  TIMEOUT_OVERRIDE=""
+
+  while [ $# -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+      -h|--help)   usage; return 0 ;;
+      --version)   printf 'revertii %s\n' "$VERSION"; return 0 ;;
+      --dry-run)   DRY_RUN=yes ;;
+      --from-timer) FROM_TIMER=yes ;;
+      --timeout)
+        shift
+        [ $# -gt 0 ] || die "--timeout needs a value"
+        TIMEOUT_OVERRIDE="$1"
+        ;;
+      -*)          die "unknown option: $arg" ;;
+      *)
+        if [ -z "$cmd" ]; then cmd="$arg"
+        elif [ -z "$service" ]; then service="$arg"
+        else die "unexpected argument: $arg"
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  [ -n "$cmd" ] || { usage; return 2; }
+
+  case "$cmd" in
+    list) cmd_list ;;
+    update|check|revert|confirm|status)
+      [ -n "$service" ] || die "$cmd needs a service name — try 'revertii list'"
+      "cmd_$cmd" "$service"
+      ;;
+    *) die "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"
