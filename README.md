@@ -188,11 +188,23 @@ $ shellcheck bin/revertii
 $ bats test/
 ```
 
-The tests stub `systemctl` and `systemd-run`, which is what makes them
-runnable off Linux — and is also the right boundary on Linux: they assert what
-revertii *asked* systemd to do, including that the timer is armed before the
-update runs. Whether systemd then honours a transient timer is systemd's
-business.
+Most of the suite stubs `systemctl` and `systemd-run`, which is what makes it
+runnable off Linux — and is the right boundary for behaviour that is
+revertii's own: it asserts what revertii *asked* systemd to do, including that
+the timer is armed before the update runs.
+
+`test/systemd.bats` covers what a stub cannot answer, against a real user
+manager: that systemd accepts the transient timer, that the unit does not
+outlive itself, and — the case the tool exists for — that an `UPDATE` which
+kills revertii mid-run still ends in a revert, carried out by the timer with
+no process left to do it. It skips itself where there is no systemd, and CI
+fails if it skipped there, because a skip reads as a pass.
+
+Both of the bugs that file has found so far were invisible to the stubs,
+which had faithfully recorded a correct request: systemd deferring a 5-second
+timer to 21 (`AccuracySec` defaults to a minute), and the timer unit starting
+with an environment that did not carry `REVERTII_CONFIG_DIR`, so a revert on
+relocated paths woke up and found nothing.
 
 Security issues go [privately](SECURITY.md), never in a public issue — and note
 that a service config is executed as root by design, so it belongs in a
