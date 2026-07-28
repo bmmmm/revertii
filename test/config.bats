@@ -109,3 +109,40 @@ setup() { setup_stub_env; }
   [ "$status" -eq 2 ]
   [[ "$output" == *"unknown option"* ]]
 }
+
+@test "a config that calls systemctl without a scope is warned about when rootless" {
+  # The failure this catches is silent and lands late: a hardcoded systemctl
+  # reaches the system manager, so a rootless RESTORE puts the old version back
+  # and then fails to restart — old state on disk, broken version still running.
+  write_config gw 'UPDATE="systemctl restart app.service"'
+  run "$REVERTII" update gw
+  [[ "$output" == *"UPDATE calls systemctl without a scope"* ]]
+  [[ "$output" == *"REVERTII_SYSTEMD_SCOPE"* ]]
+}
+
+@test "a config using the scope variable is not warned about, and gets the real scope" {
+  cat > "$REVERTII_CONFIG_DIR/gw.conf" <<EOF
+KIND=daemon
+SNAPSHOT='echo v1.0.0'
+UPDATE='systemctl \$REVERTII_SYSTEMD_SCOPE restart app.service'
+RESTORE='echo \$REVERTII_SNAPSHOT'
+HEALTH='true'
+HEALTH_TIMEOUT=5
+HEALTH_INTERVAL=1
+REVERT_AFTER=60
+EOF
+  chmod 600 "$REVERTII_CONFIG_DIR/gw.conf"
+
+  run "$REVERTII" update gw
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"without a scope"* ]]
+  # The point of the variable: it arrived expanded, as the scope this run uses.
+  grep -q '^systemctl --user restart app.service$' "$STUB_LOG"
+}
+
+@test "a root-style config is not warned about for a reason that only applies rootless" {
+  # --system is explicit, so it is a deliberate choice rather than an omission.
+  write_config gw 'UPDATE="systemctl --system restart app.service"'
+  run "$REVERTII" update gw
+  [[ "$output" != *"without a scope"* ]]
+}

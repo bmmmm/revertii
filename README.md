@@ -113,6 +113,9 @@ revertii refuses to read a config that is group- or world-writable.
 | `PROBE_RUN` | run a `job` once after updating to see whether it still works |
 | `MAX_AGE` | how old a job's last success may be |
 
+Two variables are handed *to* your commands rather than read from them:
+`$REVERTII_SNAPSHOT` (in `RESTORE`) and `$REVERTII_SYSTEMD_SCOPE` (everywhere).
+
 **Use single quotes.** The file is sourced, so a double-quoted
 `$REVERTII_SNAPSHOT` expands to nothing at that moment rather than at revert
 time — leaving a `RESTORE` that looks correct and silently restores whatever
@@ -122,6 +125,15 @@ which is the usual symptom.
 The snapshot reaches `RESTORE` through the environment and is never spliced
 into the command string, so a tag containing a space or a quote cannot change
 what runs.
+
+**Write `systemctl $REVERTII_SYSTEMD_SCOPE …`, not bare `systemctl`.** Your
+commands face the same root-or-not question revertii answered at startup, and
+they cannot see how it was answered — so revertii hands it to them:
+`--system` as root, `--user` otherwise. A hardcoded `systemctl` always talks
+to the system manager, which a rootless user cannot reach. That failure is
+worst inside `RESTORE`, where it lands *after* the old state is back: old
+image on disk, broken version still running, and a revert that ran to the
+end. revertii warns about a scopeless `systemctl` when it is running rootless.
 
 See [`examples/`](examples/) for a containerised gateway, a restic backup job,
 a native unit running from a git checkout, and an image you build yourself.

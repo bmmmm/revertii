@@ -39,6 +39,12 @@ else
   SYSTEMD_SCOPE="--user"
 fi
 readonly SYSTEMD_SCOPE
+# Handed to the config's own commands, which face the same choice and cannot
+# see how revertii was started. A config that hardcodes `systemctl restart`
+# works as root and fails for every rootless user — worst inside RESTORE,
+# where the failure lands after the snapshot was already put back: old image,
+# new container still running, and a revert that reported success.
+export REVERTII_SYSTEMD_SCOPE="$SYSTEMD_SCOPE"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 readonly SELF
 
@@ -151,6 +157,20 @@ validate_config() {
     *REVERTII_SNAPSHOT*) ;;
     *) warn "$file: RESTORE does not mention \$REVERTII_SNAPSHOT — if it should, wrap the value in single quotes so it survives being sourced" ;;
   esac
+
+  # A bare `systemctl` reaches the system manager, which a rootless user cannot
+  # talk to. Only a problem when we are actually rootless, so the check asks
+  # about this run rather than about the file — a root config is not wrong.
+  if [ "$SYSTEMD_SCOPE" = "--user" ]; then
+    for field in PREPARE UPDATE RESTORE HEALTH; do
+      case "${!field}" in
+        *systemctl*REVERTII_SYSTEMD_SCOPE*|*'systemctl --user'*|*'systemctl --system'*|'') ;;
+        *systemctl*)
+          warn "$file: $field calls systemctl without a scope, but revertii is running rootless — use 'systemctl \$REVERTII_SYSTEMD_SCOPE …' or it will address the system manager and fail"
+          ;;
+      esac
+    done
+  fi
 }
 
 # ─── state ───────────────────────────────────────────────────────────────────
