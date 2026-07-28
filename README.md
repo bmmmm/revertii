@@ -123,10 +123,13 @@ revertii status <service>    what is armed, what was snapshotted, when
 revertii list                configured services
 ```
 
-`--dry-run` prints what would happen and changes nothing. Exit codes: `0`
-fine, `1` reverted, `2` refused to act, `3` the restore itself failed — that
-last one means the host is running neither the old state nor a verified new
-one, and it says so rather than exiting quietly.
+`--dry-run` prints what would happen and changes nothing.
+
+Exit codes: `0` fine, `1` reverted, `2` refused to act, `3` the restore itself
+failed, `4` the update outlived its own timer. The last two are the ones to
+alert on: `3` means the host is running neither the old state nor a verified
+new one, and `4` means a revert already happened and the update then completed
+on top of it. Both say so rather than exiting quietly.
 
 ## Letting an agent trigger it
 
@@ -158,6 +161,14 @@ runnable off Linux — and is also the right boundary on Linux: they assert what
 revertii *asked* systemd to do, including that the timer is armed before the
 update runs. Whether systemd then honours a transient timer is systemd's
 business.
+
+Security issues go [privately](SECURITY.md), never in a public issue — and note
+that a service config is executed as root by design, so it belongs in a
+root-owned directory.
+
+## Support
+
+If this is useful to you, [ko-fi.com/bmabma](https://ko-fi.com/bmabma).
 
 ## License
 
