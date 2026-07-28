@@ -353,7 +353,7 @@ do_revert() {
     die "recorded snapshot for '$service' is empty — refusing to run RESTORE with nothing to restore"
   # Says which of the two happened, because that is the difference between
   # "someone decided this" and "nobody confirmed in time" — and the journal is
-  # where she has to reconstruct it from, without logging in.
+  # the only place to tell them apart afterwards, without logging in.
   if [ "${FROM_TIMER:-no}" = yes ]; then
     log "revert timer fired: '$service' was not confirmed within ${REVERT_AFTER}s"
   else

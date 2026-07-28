@@ -180,8 +180,8 @@ EOF
 }
 
 @test "a timer-fired revert is logged differently from a requested one" {
-  # This line is how she reconstructs afterwards, from the journal and without
-  # logging in, whether someone decided this or nobody confirmed in time.
+  # This line is what makes the journal answer, afterwards and without logging
+  # in, whether someone decided this or nobody confirmed in time.
   write_config gw
   printf 'snapshot=v1.0.0\narmed_at=1\n' > "$REVERTII_STATE_DIR/gw.state"
 
