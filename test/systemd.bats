@@ -148,6 +148,31 @@ HELPER
   [ "$(cat "$TEST_TMP/reverted")" = v1.0.0 ]
 }
 
+@test "a revert the timer drove leaves no state behind" {
+  # The stubs cannot catch this one: they record that revertii asked systemd to
+  # stop the unit, but a stub cannot do what systemd does — kill the asking
+  # process, because the process IS that unit. Everything after the stop call
+  # then silently does not happen, and the leftover state makes a later
+  # `revertii revert` restore a snapshot from an update that already came back.
+  write_real_config "UPDATE='kill -9 \$PPID'" "REVERT_AFTER=5"
+
+  run "$REVERTII" update "$SERVICE"
+  for _ in $(seq 1 40); do
+    [ -f "$TEST_TMP/reverted" ] && break
+    sleep 1
+  done
+  [ -f "$TEST_TMP/reverted" ] || {
+    echo "the timer never reverted — this test cannot say anything about state"
+    false
+  }
+
+  [ ! -f "$REVERTII_STATE_DIR/$SERVICE.state" ] || {
+    echo "state left behind after the revert completed:"
+    cat "$REVERTII_STATE_DIR/$SERVICE.state"
+    false
+  }
+}
+
 @test "the transient unit does not outlive itself" {
   # --collect is what keeps a fired unit from sitting in systemd's list as
   # failed/inactive forever. A leftover would make the next run's "is a revert

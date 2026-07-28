@@ -244,8 +244,14 @@ disarm_timer() {
   local service="$1" unit
   unit="$(timer_unit "$service")"
   systemctl "$SYSTEMD_SCOPE" stop "$unit.timer" >/dev/null 2>&1
-  systemctl "$SYSTEMD_SCOPE" stop "$unit.service" >/dev/null 2>&1
-  systemctl "$SYSTEMD_SCOPE" reset-failed "$unit.service" >/dev/null 2>&1
+  # When the revert IS this service, stopping it stops us: systemd SIGTERMs the
+  # whole unit, so every line after this one never runs — the state file stays
+  # behind, and a later `revertii revert` then restores that stale snapshot
+  # instead of refusing. The unit is already on its way out; --collect reaps it.
+  if [ "${FROM_TIMER:-no}" != yes ]; then
+    systemctl "$SYSTEMD_SCOPE" stop "$unit.service" >/dev/null 2>&1
+    systemctl "$SYSTEMD_SCOPE" reset-failed "$unit.service" >/dev/null 2>&1
+  fi
   return 0
 }
 
@@ -428,8 +434,8 @@ do_revert() {
     exit 3
   fi
 
-  disarm_timer "$service"
   clear_state "$service"
+  disarm_timer "$service"
 }
 
 cmd_revert() {
