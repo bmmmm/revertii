@@ -117,6 +117,37 @@ EOF
   }
 }
 
+@test "a RESTORE that fires from the timer finds the same commands the update did" {
+  # Same class as the config dir: the unit starts with a fresh environment, so
+  # whatever PATH the caller had is not automatically the one the revert runs
+  # with. A restore command calling something outside systemd's default PATH
+  # (podman from linuxbrew, a wrapper in ~/.local/bin) would work at update
+  # time and fail at revert time — the one moment nobody is watching.
+  mkdir -p "$TEST_TMP/bin"
+  cat > "$TEST_TMP/bin/restore-helper" <<HELPER
+#!/bin/sh
+printf '%s' "\$1" > $TEST_TMP/reverted
+HELPER
+  chmod +x "$TEST_TMP/bin/restore-helper"
+  export PATH="$TEST_TMP/bin:$PATH"
+
+  write_real_config "UPDATE='kill -9 \$PPID'" \
+    "RESTORE='restore-helper \"\$REVERTII_SNAPSHOT\"'" "REVERT_AFTER=5"
+
+  run "$REVERTII" update "$SERVICE"
+  for _ in $(seq 1 40); do
+    [ -f "$TEST_TMP/reverted" ] && break
+    sleep 1
+  done
+
+  [ -f "$TEST_TMP/reverted" ] || {
+    echo "the revert never ran the helper — PATH did not survive into the timer unit"
+    journalctl --user -u "revertii-revert-$SERVICE.service" --no-pager -n 20 2>/dev/null || true
+    false
+  }
+  [ "$(cat "$TEST_TMP/reverted")" = v1.0.0 ]
+}
+
 @test "the transient unit does not outlive itself" {
   # --collect is what keeps a fired unit from sitting in systemd's list as
   # failed/inactive forever. A leftover would make the next run's "is a revert
