@@ -1,0 +1,12 @@
+.env
+*credentials*
+*secret*
+*token*
+*.pem
+*.key
+*.p12
+*.pfx
+.ssh/
+id_*
+*_host_key
+.DS_Store
