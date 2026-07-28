@@ -45,10 +45,30 @@ provisional until proven, and proving it is a separate, explicit act.
 
 ## Install
 
+Root is not required. revertii follows whoever runs it: as root it uses
+`/etc/revertii`, `/var/lib/revertii` and systemd's system scope; as an
+ordinary user it uses XDG paths and `--user` units throughout.
+
+**Rootless** — for podman containers under systemd `--user` units, which is
+where an agent-triggerable command belongs:
+
 ```console
-# install -m 755 bin/revertii /usr/local/bin/revertii
+$ install -Dm755 bin/revertii ~/.local/bin/revertii
+$ mkdir -p ~/.config/revertii && chmod 700 ~/.config/revertii
+$ install -m600 examples/self-built-podman.conf ~/.config/revertii/myapp.conf
+$ loginctl enable-linger "$USER"
+```
+
+That last line matters more than it looks. Without lingering, `--user` units
+stop when the session ends — so the revert timer would die exactly when nobody
+is logged in, which is the situation this whole tool is built for.
+
+**As root** — for system units:
+
+```console
+# install -Dm755 bin/revertii /usr/local/bin/revertii
 # mkdir -p /etc/revertii && chmod 700 /etc/revertii
-# install -m 600 examples/gateway.conf /etc/revertii/gateway.conf
+# install -m600 examples/gateway.conf /etc/revertii/gateway.conf
 ```
 
 Needs bash, systemd (for `systemd-run`) and whatever your own config commands

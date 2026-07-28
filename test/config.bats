@@ -72,6 +72,26 @@ setup() { setup_stub_env; }
   [[ "$output" == *"chmod 600"* ]]
 }
 
+@test "an unprivileged run looks under XDG, not /etc" {
+  # Root is not a requirement: rootless podman with systemd --user units needs
+  # none of it, and that is the better place for an agent-triggerable command
+  # to live. The paths and the systemd scope have to follow the same decision.
+  unset REVERTII_CONFIG_DIR REVERTII_STATE_DIR
+  XDG_CONFIG_HOME="$TEST_TMP/xdg-config" run "$REVERTII" update gw
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"$TEST_TMP/xdg-config/revertii/gw.conf"* ]]
+  [[ "$output" != *"/etc/revertii"* ]]
+}
+
+@test "the systemd scope follows the same decision as the paths" {
+  write_config gw
+  run "$REVERTII" update gw
+  [ "$status" -eq 0 ]
+  # The test suite never runs as root, so every systemd call must be --user.
+  grep -qE 'systemd-run --user' "$STUB_LOG"
+  ! grep -qE 'systemctl --system' "$STUB_LOG"
+}
+
 @test "a missing config points at how to find the right name" {
   run "$REVERTII" update nosuch
   [ "$status" -eq 2 ]

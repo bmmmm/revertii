@@ -23,8 +23,22 @@
 set -uo pipefail
 
 readonly VERSION="0.1.0"
-CONFIG_DIR="${REVERTII_CONFIG_DIR:-/etc/revertii}"
-STATE_DIR="${REVERTII_STATE_DIR:-/var/lib/revertii}"
+
+# Root is not a requirement, only a consequence of where the service lives.
+# Rootless podman with systemd --user units needs none of it, and that is the
+# better place to be: an agent allowed to run this then cannot touch anything
+# outside one user account. Running as root stays supported for system units,
+# which is what `systemctl restart` on a system service actually needs.
+if [ "$(id -u)" -eq 0 ]; then
+  CONFIG_DIR="${REVERTII_CONFIG_DIR:-/etc/revertii}"
+  STATE_DIR="${REVERTII_STATE_DIR:-/var/lib/revertii}"
+  SYSTEMD_SCOPE="--system"
+else
+  CONFIG_DIR="${REVERTII_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/revertii}"
+  STATE_DIR="${REVERTII_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/revertii}"
+  SYSTEMD_SCOPE="--user"
+fi
+readonly SYSTEMD_SCOPE
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 readonly SELF
 
@@ -179,7 +193,7 @@ arm_timer() {
   # Transient unit rather than a written .timer file: it must not survive a
   # reboot. A revert firing hours later, after someone already fixed things by
   # hand, would undo their work.
-  if ! systemd-run --collect --unit="$unit" --on-active="${seconds}s" \
+  if ! systemd-run "$SYSTEMD_SCOPE" --collect --unit="$unit" --on-active="${seconds}s" \
       --description="revertii: revert $service unless confirmed" \
       "$SELF" revert "$service" --from-timer >/dev/null 2>&1; then
     die "could not arm the revert timer for '$service' — refusing to update without a way back"
@@ -190,14 +204,14 @@ arm_timer() {
 disarm_timer() {
   local service="$1" unit
   unit="$(timer_unit "$service")"
-  systemctl stop "$unit.timer" >/dev/null 2>&1
-  systemctl stop "$unit.service" >/dev/null 2>&1
-  systemctl reset-failed "$unit.service" >/dev/null 2>&1
+  systemctl "$SYSTEMD_SCOPE" stop "$unit.timer" >/dev/null 2>&1
+  systemctl "$SYSTEMD_SCOPE" stop "$unit.service" >/dev/null 2>&1
+  systemctl "$SYSTEMD_SCOPE" reset-failed "$unit.service" >/dev/null 2>&1
   return 0
 }
 
 timer_armed() {
-  systemctl is-active --quiet "$(timer_unit "$1").timer" 2>/dev/null
+  systemctl "$SYSTEMD_SCOPE" is-active --quiet "$(timer_unit "$1").timer" 2>/dev/null
 }
 
 # ─── running configured commands ─────────────────────────────────────────────
@@ -240,10 +254,10 @@ health_job() {
 
   if [ "$PROBE_RUN" = yes ]; then
     log "starting $UNIT once to see whether it still works"
-    systemctl start "$UNIT" >/dev/null 2>&1 || true
+    systemctl "$SYSTEMD_SCOPE" start "$UNIT" >/dev/null 2>&1 || true
     local deadline
     deadline=$(( $(date +%s) + timeout ))
-    while systemctl is-active --quiet "$UNIT" 2>/dev/null; do
+    while systemctl "$SYSTEMD_SCOPE" is-active --quiet "$UNIT" 2>/dev/null; do
       [ "$(date +%s)" -lt "$deadline" ] || {
         warn "$UNIT still running after ${timeout}s — cannot tell yet whether it succeeds"
         return 1
@@ -253,10 +267,10 @@ health_job() {
   fi
 
   local result age now entered
-  result="$(systemctl show -p Result --value "$UNIT" 2>/dev/null)"
+  result="$(systemctl "$SYSTEMD_SCOPE" show -p Result --value "$UNIT" 2>/dev/null)"
   [ "$result" = success ] || { warn "$UNIT last result: ${result:-unknown}"; return 1; }
 
-  entered="$(systemctl show -p ExecMainExitTimestampMonotonic --value "$UNIT" 2>/dev/null)"
+  entered="$(systemctl "$SYSTEMD_SCOPE" show -p ExecMainExitTimestampMonotonic --value "$UNIT" 2>/dev/null)"
   if [ -n "$entered" ] && [ "$entered" != 0 ]; then
     now="$(cut -d' ' -f1 /proc/uptime 2>/dev/null | cut -d. -f1)"
     age=$(( now - entered / 1000000 ))

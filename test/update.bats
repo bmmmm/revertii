@@ -218,7 +218,7 @@ EOF
   run "$REVERTII" update backup
   [ "$status" -eq 0 ]
   [[ "$output" == *"starting restic-backup.service once"* ]]
-  grep -q 'systemctl start restic-backup.service' "$STUB_LOG"
+  grep -qE 'systemctl (--system|--user) start restic-backup\.service' "$STUB_LOG"
 }
 
 @test "a job whose probe run fails is reverted" {

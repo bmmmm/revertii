@@ -31,6 +31,9 @@ STUB
   cat > "$TEST_TMP/bin/systemctl" <<'STUB'
 #!/bin/sh
 echo "systemctl $*" >> "$STUB_LOG"
+# Every call now carries --system or --user first; drop it so the argument
+# positions below stay the ones the subcommands actually use.
+case "$1" in --user|--system) shift ;; esac
 case "$1 $2" in
   "is-active --quiet")
     # `is-active` is asked both about the revert timer and, for jobs, about the
@@ -84,6 +87,6 @@ write_config() {
 }
 
 timer_was_armed() { grep -q '^systemd-run .*--on-active' "$STUB_LOG"; }
-timer_was_disarmed() { grep -q '^systemctl stop revertii-revert-' "$STUB_LOG"; }
+timer_was_disarmed() { grep -qE '^systemctl (--system|--user) stop revertii-revert-' "$STUB_LOG"; }
 set_timer_active() { echo active > "$TEST_TMP/timer-state"; }
 set_unit_result() { echo "$1" > "$TEST_TMP/unit-result"; }

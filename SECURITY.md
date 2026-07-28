@@ -12,17 +12,24 @@ estimate rather than a commitment.
 ## The trust boundary, stated plainly
 
 **Whoever can write a service config can run commands as whoever runs
-revertii — which is usually root.** That is not a flaw to be fixed; it is what
-the config *is*. `SNAPSHOT`, `PREPARE`, `UPDATE`, `RESTORE` and `HEALTH` hold
-shell commands because "how do I put this back" cannot be expressed as data,
-and the file is sourced so those commands can use pipes, redirects and
-variables like any script.
+revertii.** That is not a flaw to be fixed; it is what the config *is*.
+`SNAPSHOT`, `PREPARE`, `UPDATE`, `RESTORE` and `HEALTH` hold shell commands
+because "how do I put this back" cannot be expressed as data, and the file is
+sourced so those commands can use pipes, redirects and variables like any
+script.
 
-So treat `/etc/revertii/*.conf` exactly as you would treat a root-owned script:
+**Which is why root is worth avoiding.** revertii does not require it: run as
+an ordinary user against systemd `--user` units and rootless podman, and the
+blast radius of that boundary is one user account rather than the host. Root
+is only needed for system-wide units, where `systemctl restart` needs it
+anyway.
+
+Either way, treat a service config exactly as you would treat a script owned
+by the account that runs it:
 
 ```console
-# chown root:root /etc/revertii && chmod 700 /etc/revertii
-# chmod 600 /etc/revertii/*.conf
+$ chmod 700 ~/.config/revertii && chmod 600 ~/.config/revertii/*.conf
+# chown root:root /etc/revertii && chmod 700 /etc/revertii   # if running as root
 ```
 
 revertii refuses to read a config that is group- or world-writable, which
