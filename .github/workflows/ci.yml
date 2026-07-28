@@ -57,7 +57,14 @@ jobs:
           exit 1
       - name: Run bats tests
         run: |
-          out=$(bats test/ | tee /dev/stderr)
+          # No pipe around bats: piping it to tee hands $? to tee, and this job
+          # reported success over a failing test exactly once before that was
+          # noticed. Capture, print, then check the status explicitly.
+          set +e
+          out=$(bats test/)
+          rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || exit "$rc"
           # A skip reads as a pass. On a Mac that is correct; here it would
           # leave the real-systemd claim untested, which is the whole point of
           # running them on a VM that has systemd.

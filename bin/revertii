@@ -218,8 +218,16 @@ arm_timer() {
   # For a deadline nobody is watching, "300s from now" has to mean it — the
   # window between the promised revert and the real one is time a broken
   # service stays broken, and the message would be quietly wrong about it.
+  # The unit starts with a fresh environment — it does not inherit this
+  # process's. Passing the directories explicitly is what makes the timer look
+  # in the same place the update did: without it, anyone who moved the paths
+  # gets a timer that exits "no config for <service>" into the journal, at the
+  # one moment nobody is watching. Empty values are fine; the defaults then
+  # apply on both sides.
   if ! systemd-run "$SYSTEMD_SCOPE" --collect --unit="$unit" --on-active="${seconds}s" \
       --timer-property=AccuracySec=1s \
+      --setenv=REVERTII_CONFIG_DIR="$CONFIG_DIR" \
+      --setenv=REVERTII_STATE_DIR="$STATE_DIR" \
       --description="revertii: revert $service unless confirmed" \
       "$SELF" revert "$service" --from-timer >/dev/null 2>&1; then
     die "could not arm the revert timer for '$service' — refusing to update without a way back"
