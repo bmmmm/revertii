@@ -213,21 +213,26 @@ arm_timer() {
   # Transient unit rather than a written .timer file: it must not survive a
   # reboot. A revert firing hours later, after someone already fixed things by
   # hand, would undo their work.
-  # AccuracySec, or systemd defers the timer by up to a minute to batch wakeups
-  # with other units. Measured on a real host: --on-active=5s fired after 21s.
-  # For a deadline nobody is watching, "300s from now" has to mean it — the
-  # window between the promised revert and the real one is time a broken
-  # service stays broken, and the message would be quietly wrong about it.
-  # The unit starts with a fresh environment — it does not inherit this
-  # process's. Passing the directories explicitly is what makes the timer look
-  # in the same place the update did: without it, anyone who moved the paths
-  # gets a timer that exits "no config for <service>" into the journal, at the
-  # one moment nobody is watching. Empty values are fine; the defaults then
-  # apply on both sides.
+  #
+  # The three explicit properties below all answer the same thing, and all
+  # three were found by running this against real systemd rather than a stub —
+  # which had faithfully recorded a request that was correct as far as it went:
+  #
+  #   AccuracySec  systemd defers timers by up to a minute to batch wakeups.
+  #                Measured: --on-active=5s fired after 21s, so "300s from now"
+  #                was untrue by most of a minute — time a broken service stays
+  #                broken while the message claims otherwise.
+  #   --setenv     the unit gets a fresh environment, not this process's. The
+  #                revert has to run in the same world the update did: the same
+  #                config and state dirs, and the same PATH — a RESTORE calling
+  #                podman from linuxbrew or a wrapper in ~/.local/bin works at
+  #                update time and fails at revert time otherwise. Both failures
+  #                land in the journal at the one moment nobody is watching.
   if ! systemd-run "$SYSTEMD_SCOPE" --collect --unit="$unit" --on-active="${seconds}s" \
       --timer-property=AccuracySec=1s \
       --setenv=REVERTII_CONFIG_DIR="$CONFIG_DIR" \
       --setenv=REVERTII_STATE_DIR="$STATE_DIR" \
+      --setenv=PATH="$PATH" \
       --description="revertii: revert $service unless confirmed" \
       "$SELF" revert "$service" --from-timer >/dev/null 2>&1; then
     die "could not arm the revert timer for '$service' — refusing to update without a way back"
