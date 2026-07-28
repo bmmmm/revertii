@@ -20,16 +20,25 @@ reverted to v2.3.1
 
 ## Why the ordering is the design
 
-1. **snapshot** the current state
-2. **arm** the dead man's switch
-3. **apply** the update
-4. **check** health against a deadline
-5. healthy → **disarm**; unhealthy → **revert now**, without waiting for the timer
+1. **prepare** — build, pull, fetch: anything that does not touch what is running
+2. **snapshot** the current state
+3. **arm** the dead man's switch
+4. **apply** the update
+5. **check** health against a deadline
+6. healthy → **disarm**; unhealthy → **revert now**, without waiting for the timer
 
-Step 2 sits before step 3 deliberately. If the update takes the host with it,
-steps 4 and 5 never run — the armed timer is the only thing left, and it is
+Step 3 sits before step 4 deliberately. If the update takes the host with it,
+steps 5 and 6 never run — the armed timer is the only thing left, and it is
 already in place. That is the whole difference from a wrapper that updates and
 then checks: this one survives its own failure.
+
+Step 1 exists so the armed window stays short. A build can take longer than the
+whole revert window, and a build *inside* that window is a race: the timer
+fires mid-build and reverts, then the finished build switches to the new
+version on top of the revert — live, unverified, with nothing armed behind it.
+Put slow work in `PREPARE`; it runs before anything is armed. revertii also
+detects the race after the fact and exits `4` rather than running a health
+check whose result no longer controls anything.
 
 The same idea as Cisco's `reload in 5` or `iptables-apply`: the change is
 provisional until proven, and proving it is a separate, explicit act.
@@ -73,7 +82,8 @@ revertii refuses to read a config that is group- or world-writable.
 | Key | |
 | --- | --- |
 | `KIND` | `daemon` or `job` |
-| `SNAPSHOT` | prints the current state on stdout — a tag, a commit, a version |
+| `PREPARE` | optional; build/pull/fetch — runs *before* the timer is armed |
+| `SNAPSHOT` | prints the current state on stdout — a tag, a commit, an image ID |
 | `UPDATE` | applies the update |
 | `RESTORE` | puts back `$REVERTII_SNAPSHOT` |
 | `HEALTH` | succeeds only when the service really answers (`daemon`) |
@@ -94,7 +104,13 @@ into the command string, so a tag containing a space or a quote cannot change
 what runs.
 
 See [`examples/`](examples/) for a containerised gateway, a restic backup job,
-and a native unit running from a git checkout.
+a native unit running from a git checkout, and an image you build yourself.
+
+For a self-built image, snapshot the **image ID**, not the tag: a rebuild moves
+the tag, so a tag recorded beforehand points at the new image afterwards, and
+restoring it would restore exactly what you were undoing. The old image stays
+in local storage, which makes rollback for a self-built image easier than for a
+pulled one — nothing has to come back from a registry.
 
 ## Commands
 

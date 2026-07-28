@@ -81,6 +81,42 @@ EOF
   [[ "$output" == *"reverted to v1.0.0"* ]]
 }
 
+@test "PREPARE runs before the timer is armed" {
+  # Building an image can outlast the whole revert window. Anything that does
+  # not touch the running service belongs outside the armed window.
+  write_config gw "PREPARE=\"echo PREPARE-RAN >> '$STUB_LOG'\""
+  run "$REVERTII" update gw
+  [ "$status" -eq 0 ]
+  local prepared armed
+  prepared=$(grep -n 'PREPARE-RAN' "$STUB_LOG" | head -1 | cut -d: -f1)
+  armed=$(grep -n 'systemd-run .*--on-active' "$STUB_LOG" | head -1 | cut -d: -f1)
+  [ -n "$prepared" ] && [ -n "$armed" ]
+  [ "$prepared" -lt "$armed" ]
+}
+
+@test "a failing PREPARE stops before anything is armed or changed" {
+  write_config gw 'PREPARE="false"'
+  run "$REVERTII" update gw
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"prepare failed"* ]]
+  [[ "$output" == *"nothing was changed"* ]]
+  ! timer_was_armed
+}
+
+@test "an update that outlived its own timer is reported, not health-checked" {
+  # The race this catches: the timer fires mid-update and reverts, then the
+  # update finishes on top of the revert. The new version is live, unverified,
+  # with nothing armed behind it — and a health check now decides nothing.
+  # UPDATE clearing the timer state is the stub's way of saying "the timer
+  # fired and reverted while I was still running".
+  write_config gw "UPDATE=\"echo inactive > '$TEST_TMP/timer-state'\""
+  run "$REVERTII" update gw
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"fired while UPDATE was still running"* ]]
+  [[ "$output" == *"move the slow part"* ]]
+  [[ "$output" == *"PREPARE"* ]]
+}
+
 @test "a snapshot that produces nothing stops the update before it starts" {
   write_config gw 'SNAPSHOT="true"'
   run "$REVERTII" update gw

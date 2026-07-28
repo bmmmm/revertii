@@ -17,10 +17,14 @@ setup_stub_env() {
   echo inactive > "$TEST_TMP/timer-state"
   echo success > "$TEST_TMP/unit-result"
 
+  # The stub tracks timer state rather than just logging, because revertii now
+  # asks "is my timer still there" after the update — a stub that always says
+  # "no" would make every normal run look like the timer had fired.
   cat > "$TEST_TMP/bin/systemd-run" <<'STUB'
 #!/bin/sh
 echo "systemd-run $*" >> "$STUB_LOG"
 [ -f "$TEST_TMP/systemd-run-fails" ] && exit 1
+echo active > "$TEST_TMP/timer-state"
 exit 0
 STUB
 
@@ -37,6 +41,9 @@ case "$1 $2" in
       *) exit 3 ;;
     esac
     ;;
+esac
+case "$1 $2" in
+  "stop revertii-revert-"*) echo inactive > "$TEST_TMP/timer-state" ;;
 esac
 case "$1" in
   show)

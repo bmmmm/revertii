@@ -79,7 +79,7 @@ load_config() {
     *[2367]*) die "$file is group- or world-writable ($perms) — it is sourced and executed, so chmod 600 it" ;;
   esac
 
-  KIND=""; SNAPSHOT=""; UPDATE=""; RESTORE=""; HEALTH=""
+  KIND=""; PREPARE=""; SNAPSHOT=""; UPDATE=""; RESTORE=""; HEALTH=""
   UNIT=""; HEALTH_TIMEOUT=""; HEALTH_INTERVAL=""; REVERT_AFTER=""
   PROBE_RUN=""; MAX_AGE=""
 
@@ -291,6 +291,17 @@ cmd_update() {
     die "'$service' already has a revert pending — confirm or revert it before updating again"
   fi
 
+  # Everything that does not touch the running service happens before the
+  # timer is armed. Building an image can take longer than the whole revert
+  # window, and a build inside the armed window is a race: the timer fires
+  # mid-build, restores the old state, and the still-running update then
+  # switches to the new version anyway — leaving an unverified version live
+  # with nothing armed to take it back.
+  if [ -n "$PREPARE" ]; then
+    log "preparing (not yet armed — this changes nothing that is running)…"
+    run_step prepare "$PREPARE" || die "prepare failed — nothing was changed"
+  fi
+
   local snapshot
   if [ "${DRY_RUN:-no}" = yes ]; then
     snapshot="(dry-run)"
@@ -307,6 +318,17 @@ cmd_update() {
     warn "update command failed — reverting now"
     do_revert "$service"
     return 1
+  fi
+
+  # The update outlived its own safety net: the timer already fired and
+  # reverted while this was still running, so whatever just finished is now
+  # live, unverified, with nothing armed behind it. Say so instead of
+  # continuing into a health check whose result no longer controls anything.
+  if [ "${DRY_RUN:-no}" != yes ] && ! timer_armed "$service"; then
+    warn "the revert timer fired while UPDATE was still running — REVERT_AFTER ($REVERT_AFTER s) is shorter than the update takes"
+    warn "the service was reverted, then this update completed on top of it: verify '$service' by hand"
+    warn "move the slow part (build, pull) into PREPARE, which runs before the timer is armed"
+    return 4
   fi
 
   log "checking health (deadline ${timeout}s)…"
