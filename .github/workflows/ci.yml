@@ -39,20 +39,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -qq -y bats
-      - name: Run bats tests
-        run: bats test/
-
-  # The stubbed suite above can only assert what revertii asks systemd to do.
-  # This one runs against the runner VM's own systemd, which is the only thing
-  # that can answer whether a transient timer is accepted and whether it fires.
-  systemd:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install bats
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y bats
+      # test/systemd.bats needs a real user manager. Most of the suite stubs
+      # systemd deliberately; that file exists to check the two things a stub
+      # cannot answer, so it has to find the real one here.
       - name: Start a user manager for this session
         run: |
           sudo loginctl enable-linger "$USER"
@@ -65,17 +54,14 @@ jobs:
             sleep 1
           done
           echo "no systemd --user manager came up" >&2
-          systemctl --user status >&2 || true
           exit 1
-      - name: Run the real-systemd tests
-        run: bats test/systemd.bats
-      - name: Fail if they skipped instead of running
-        # A skip here would read as a pass and leave the claim untested — the
-        # exact failure mode this job exists to close.
+      - name: Run bats tests
         run: |
-          out=$(bats test/systemd.bats)
-          echo "$out"
+          out=$(bats test/ | tee /dev/stderr)
+          # A skip reads as a pass. On a Mac that is correct; here it would
+          # leave the real-systemd claim untested, which is the whole point of
+          # running them on a VM that has systemd.
           if grep -q '# skip' <<<"$out"; then
-            echo "::error::real-systemd tests skipped in CI; they must run here" >&2
+            echo "::error::tests skipped in CI, where they must run" >&2
             exit 1
           fi

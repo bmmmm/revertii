@@ -82,14 +82,15 @@ EOF
   # is left, and it has to finish the job by itself.
   write_real_config "UPDATE='kill -9 \$PPID'" "REVERT_AFTER=5"
 
+  local armed_at
+  armed_at=$(date +%s)
   run "$REVERTII" update "$SERVICE"
   [ ! -f "$TEST_TMP/reverted" ] || {
     echo "revertii reverted before dying — the test did not reproduce the case"
     false
   }
 
-  # Give the timer its 5s plus room for systemd to schedule the unit.
-  for _ in $(seq 1 20); do
+  for _ in $(seq 1 40); do
     [ -f "$TEST_TMP/reverted" ] && break
     sleep 1
   done
@@ -98,6 +99,16 @@ EOF
     echo "the timer never fired"
     systemctl --user list-timers --all | head -20
     journalctl --user -u "revertii-revert-$SERVICE.service" --no-pager -n 30 2>/dev/null || true
+    false
+  }
+
+  # When it fired, not just that it did. systemd defaults to AccuracySec=1min
+  # and will happily defer a 5s timer past 20s to batch wakeups — which makes
+  # "revert armed: 5s from now" untrue by a wide margin, and leaves a broken
+  # service broken for the difference. Measured here because no stub can.
+  local waited=$(( $(date +%s) - armed_at ))
+  [ "$waited" -le 12 ] || {
+    echo "timer fired after ${waited}s for REVERT_AFTER=5 — systemd deferred it (AccuracySec?)"
     false
   }
   [ "$(cat "$TEST_TMP/reverted")" = v1.0.0 ] || {

@@ -213,7 +213,13 @@ arm_timer() {
   # Transient unit rather than a written .timer file: it must not survive a
   # reboot. A revert firing hours later, after someone already fixed things by
   # hand, would undo their work.
+  # AccuracySec, or systemd defers the timer by up to a minute to batch wakeups
+  # with other units. Measured on a real host: --on-active=5s fired after 21s.
+  # For a deadline nobody is watching, "300s from now" has to mean it — the
+  # window between the promised revert and the real one is time a broken
+  # service stays broken, and the message would be quietly wrong about it.
   if ! systemd-run "$SYSTEMD_SCOPE" --collect --unit="$unit" --on-active="${seconds}s" \
+      --timer-property=AccuracySec=1s \
       --description="revertii: revert $service unless confirmed" \
       "$SELF" revert "$service" --from-timer >/dev/null 2>&1; then
     die "could not arm the revert timer for '$service' — refusing to update without a way back"
