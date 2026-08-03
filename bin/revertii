@@ -235,6 +235,9 @@ arm_timer() {
       --setenv=PATH="$PATH" \
       --description="revertii: revert $service unless confirmed" \
       "$SELF" revert "$service" --from-timer >/dev/null 2>&1; then
+    # The snapshot was already written for a timer that does not exist —
+    # leaving it would record a state nothing is armed to protect.
+    clear_state "$service"
     die "could not arm the revert timer for '$service' — refusing to update without a way back"
   fi
   log "revert armed: ${seconds}s from now (revertii confirm $service to keep the update)"
@@ -518,6 +521,9 @@ main() {
       --timeout)
         shift
         [ $# -gt 0 ] || die "--timeout needs a value"
+        case "$1" in
+          ''|*[!0-9]*) die "--timeout must be a whole number of seconds, got '$1'" ;;
+        esac
         TIMEOUT_OVERRIDE="$1"
         ;;
       -*)          die "unknown option: $arg" ;;

@@ -110,6 +110,14 @@ setup() { setup_stub_env; }
   [[ "$output" == *"unknown option"* ]]
 }
 
+@test "a non-numeric --timeout is refused with the value quoted back" {
+  write_config gw
+  run "$REVERTII" check gw --timeout abc
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"whole number of seconds"* ]]
+  [[ "$output" == *"abc"* ]]
+}
+
 @test "a config that calls systemctl without a scope is warned about when rootless" {
   # The failure this catches is silent and lands late: a hardcoded systemctl
   # reaches the system manager, so a rootless RESTORE puts the old version back

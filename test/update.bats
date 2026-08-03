@@ -144,6 +144,17 @@ EOF
   [[ "$output" == *"refusing to update"* ]]
 }
 
+@test "a failed timer arm leaves no snapshot behind" {
+  # Otherwise a state file records a snapshot that nothing is armed to
+  # protect — harmless today only because timer_armed, not file presence,
+  # gates the next update.
+  write_config gw
+  touch "$TEST_TMP/systemd-run-fails"
+  run "$REVERTII" update gw
+  [ "$status" -eq 2 ]
+  [ ! -f "$REVERTII_STATE_DIR/gw.state" ]
+}
+
 @test "a second update is refused while a revert is still pending" {
   write_config gw
   set_timer_active
